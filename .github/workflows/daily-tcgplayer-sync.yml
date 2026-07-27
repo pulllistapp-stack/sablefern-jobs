@@ -36,4 +36,8 @@ jobs:
       - name: Cardmarket top-up
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          # Optional but wanted: raises the pokemontcg.io ceiling from
+          # 1k/hour anonymous to 20k/day. Without it this step still
+          # runs, just against a limit it can hit mid-sweep.
+          POKEMONTCG_API_KEY: ${{ secrets.POKEMONTCG_API_KEY }}
         run: python -m scripts.sync_tcgplayer_prices --cardmarket-only
