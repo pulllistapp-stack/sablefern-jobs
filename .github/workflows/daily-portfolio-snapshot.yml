@@ -1,0 +1,41 @@
+name: Daily portfolio valuation snapshot
+
+# Writes one portfolio_snapshots row per user: total value, graded-only
+# value, counts. Drives the Growth chart on /portfolio and the slab
+# value chart on /portfolio/slabs — miss a day and both lines show a
+# carried-forward gap instead of a real reading.
+#
+# Scheduled an hour after the card sync so it values collections
+# against the day's fresh prices rather than yesterday's.
+
+on:
+  schedule:
+    - cron: "0 9 * * *"
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Backfill a specific day (YYYY-MM-DD). Blank = today."
+        required: false
+        default: ""
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - run: pip install -r requirements.txt
+      - env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SNAPSHOT_DATE: ${{ inputs.date }}
+        run: |
+          if [ -n "$SNAPSHOT_DATE" ]; then
+            python -m scripts.snapshot_portfolios --date "$SNAPSHOT_DATE"
+          else
+            python -m scripts.snapshot_portfolios
+          fi
