@@ -1,0 +1,9 @@
+# Data-pipeline runtime only. No FastAPI / auth / Playwright here —
+# this repo runs scheduled DB jobs, nothing that serves requests or
+# drives a browser.
+SQLAlchemy[asyncio]==2.0.36
+asyncpg==0.30.0
+httpx==0.28.1
+python-dotenv==1.0.1
+pydantic==2.10.3
+pydantic-settings==2.6.1
