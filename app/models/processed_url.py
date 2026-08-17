@@ -10,7 +10,7 @@ class ProcessedUrl(Base):
     """Persistent dedupe log for the newsbot, decoupled from news_posts.
 
     Why a separate table instead of relying on news_posts.source_url?
-    owner regularly deletes broken or low-quality drafts from the admin
+    The owner regularly deletes broken or low-quality drafts from the admin
     UI. That removes the row — and with it, the source_url that
     dedupe was using to skip the upstream article on the next run.
     Result: the same article gets re-crawled, regenerated (burning

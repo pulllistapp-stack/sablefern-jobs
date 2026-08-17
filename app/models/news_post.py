@@ -8,7 +8,7 @@ from app.database import Base
 
 class NewsPost(Base):
     """In-DB news article. Replaces the filesystem markdown approach so
-    owner can write/edit from the browser instead of git-pushing each post.
+    The owner can write/edit from the browser instead of git-pushing each post.
 
     Body is Markdown text — same rendering pipeline as before
     (react-markdown + remark-gfm). Image upload isn't part of this
@@ -29,7 +29,7 @@ class NewsPost(Base):
     author: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     # publishedAt vs createdAt: published_at is what the user sees on the
-    # card meta strip; created_at is internal. They differ if owner writes a
+    # card meta strip; created_at is internal. They differ if the owner writes a
     # post about something that happened on a different date (e.g.
     # writing tomorrow about a release that drops today).
     published_at: Mapped[str] = mapped_column(String(10), nullable=False)
