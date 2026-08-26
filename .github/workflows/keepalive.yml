@@ -1,0 +1,20 @@
+name: keepalive
+
+# Pings the API every 12 minutes so the free-tier instance never hits
+# its 15-minute idle spin-down — first visitors stop paying the ~50s
+# cold-start tax. Lives in this public repo because scheduled minutes
+# here are free.
+on:
+  schedule:
+    - cron: "*/12 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Ping API health
+        run: |
+          code=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 120 https://api.pulllist.org/api/v1/health)
+          echo "health: $code"
