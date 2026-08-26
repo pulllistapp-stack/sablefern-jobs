@@ -1,0 +1,79 @@
+name: Refresh eBay — First Partner Illustration Sets (S1/S2/S3)
+
+# Forces a fresh eBay snapshot pass across every card in the three
+# First Partner Illustration Series 1/2/3 sets. Useful when:
+#   - A new series just launched and the nightly cron hasn't
+#     picked it up yet (e.g. Series 3 on release day).
+#   - Cached snapshots look stale vs live listings (Series 2
+#     Chikorita site $33.88 vs actual live $13 mismatch).
+#
+# Uses the existing `snapshot_ebay --set-ids` path which walks
+# every card in the given sets (including NULL-priced ones, so
+# brand-new promos with no market_price_usd get picked up too).
+#
+# One-shot / manual — not on a schedule, so we don't double up
+# with the nightly eBay sweep.
+
+on:
+  # PT-midnight is when the eBay Browse quota resets. Fire a
+  # catch-up pass ~15 min after so the daily cron has already
+  # started its work and won't collide, but there's still 4,900+
+  # of the 5,000/day budget left for the 27 fpic cards.
+  # 07:15 UTC = 00:15 PT (winter) / 23:15 PT prev day (summer);
+  # the drift is fine — we just need "after reset, before the
+  # nightly sweep exhausts the budget again".
+  schedule:
+    - cron: "15 7 * * *"
+  workflow_dispatch:
+    inputs:
+      set_ids:
+        description: "Comma-separated set IDs to refresh"
+        required: false
+        default: "fpic-s1,fpic-s2,fpic-s3"
+        type: string
+      dry_run:
+        description: "Dry-run only (report, no writes)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Private app repo checked out via a read-only deploy key —
+          # this public repo carries only the workflow files.
+          repository: pulllistapp-stack/pulllist
+          ssh-key: ${{ secrets.PULLLIST_DEPLOY_KEY }}
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - run: pip install -r requirements.txt
+      - env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          EBAY_ENV: production
+          EBAY_APP_ID: ${{ secrets.EBAY_APP_ID }}
+          EBAY_CERT_ID: ${{ secrets.EBAY_CERT_ID }}
+        run: |
+          # `inputs.*` is empty on schedule triggers even when a
+          # default is declared, so guard with a shell fallback.
+          sets="${{ inputs.set_ids }}"
+          if [ -z "$sets" ]; then
+            sets="fpic-s1,fpic-s2,fpic-s3"
+          fi
+          args="--set-ids $sets"
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            args="$args --dry-run"
+          fi
+          python -m scripts.snapshot_ebay $args

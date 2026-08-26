@@ -1,0 +1,65 @@
+name: Ingest — m6a 30th Celebration (Bulbapedia daily catch-up)
+
+# 30th Celebration reveals land almost daily until the 16 Sep release.
+# The PokeBeach spoiler poller only understands the EN me30 filename
+# patterns, so JP-side reveals (like the 30-Pikachu subset published
+# as official m6a_NNN images) slip past it. Bulbapedia documents those
+# same cards within a day or two — re-running the ingest daily keeps
+# m6a caught up without parsing name-less official filenames.
+#
+# Safe to re-run: the script upserts by card id and skips rows whose
+# image is already mirrored.
+
+on:
+  schedule:
+    # 09:10 UTC daily — after the overnight US/JP reveal cycle and the
+    # Bulbapedia editors' pass, before the daily admin review.
+    - cron: "10 9 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Log what would change without writing"
+        type: boolean
+        default: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Private app repo checked out via a read-only deploy key —
+          # this public repo carries only the workflow files.
+          repository: pulllistapp-stack/pulllist
+          ssh-key: ${{ secrets.PULLLIST_DEPLOY_KEY }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install deps
+        working-directory: backend
+        run: pip install -r requirements.txt
+
+      - name: Run ingest
+        working-directory: backend
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          # R2_ENDPOINT / _BUCKET / _PUBLIC_URL are non-sensitive infra
+          # config — kept inline and in sync with backend/.env, same as
+          # refresh-jp-official-images.yml.
+          R2_ENDPOINT: https://ee13d55a8c51339e074dcac7af9c9b48.r2.cloudflarestorage.com
+          R2_BUCKET: pulllist-setslogosbackup
+          R2_PUBLIC_URL: https://pub-41c2ef36112f48f3bba1ce11a627209d.r2.dev
+          LOG_LEVEL: INFO
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            python -m scripts.ingest_m6a_30th_celebration --dry-run
+          else
+            python -m scripts.ingest_m6a_30th_celebration --apply
+          fi

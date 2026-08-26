@@ -1,0 +1,61 @@
+name: Scrape — me30 spoilers (PokéBeach auto-poll)
+
+# Every 4h: crawl PokéBeach's "30th Celebration" search results,
+# parse card image filenames for spoilers we haven't seeded yet,
+# and insert the new rows into the me30 set.
+#
+# Idempotent — runs where nothing new lands just log "no new cards".
+# Manual dispatch supported for on-demand pulls.
+
+on:
+  schedule:
+    # 6/10/14/18/22/02 UTC — six passes/day, PT-friendly cadence so
+    # reveals dropped US-morning show up within a few hours.
+    - cron: "0 */4 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry-run only (report, no writes)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      max_articles:
+        description: "How many search results to walk"
+        required: false
+        default: "20"
+        type: string
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Private app repo checked out via a read-only deploy key —
+          # this public repo carries only the workflow files.
+          repository: pulllistapp-stack/pulllist
+          ssh-key: ${{ secrets.PULLLIST_DEPLOY_KEY }}
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - run: pip install -r requirements.txt
+      - run: |
+          pip install playwright
+          python -m playwright install --with-deps chromium
+      - env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          args="--max-articles ${{ inputs.max_articles || '20' }}"
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            args="$args --dry-run"
+          fi
+          python -m scripts.scrape_pokebeach_me30_spoilers $args

@@ -1,0 +1,107 @@
+name: Refresh JP official images (daily)
+
+# Nightly sweep: probes pokemon-card.com for official card scans of
+# recently-released JP sets and swaps out fan-photo / leak sources
+# (billsarchive, bulbagarden CDN, tcgbox, collectory, weserv) as
+# the publisher pushes them out.
+#
+# Pre-release ingest of a new JP set (m6 Storm Emeralda, m7 Aura
+# Seeker, future MC2 etc.) leans on billsarchive because pokemon-
+# card.com doesn't publish images until Day 0 (marketing highlights)
+# / Day 1-3 (full catalog). Once official images land, we want to
+# replace the fan photos automatically without a human triggering it.
+#
+# Runs against every set in the SET_IDS matrix. Empty runs (no
+# official images available yet) exit near-instantly — a full sweep
+# for all listed sets when nothing is new costs ~30s + a few
+# marketing-page HTTP hits, comfortably inside the free tier.
+#
+# When a set is fully mirrored, remove it from the matrix. Adding a
+# new set = edit the matrix.
+
+on:
+  schedule:
+    # 08:15 UTC = 04:15 EDT / 03:15 EST / 17:15 JST. Well after the
+    # pokemon-card.com publish window (JP TCR publishes late morning
+    # JST on release day) so a next-day check catches anything that
+    # dropped overnight. Off-peak from GH Actions cron congestion.
+    - cron: "15 8 * * *"
+  workflow_dispatch:
+    inputs:
+      set_id:
+        description: "Set id override for one-off manual runs (e.g. m6). Blank = full matrix."
+        required: false
+        default: ""
+
+concurrency:
+  # Serialize runs — DB UPDATEs + R2 PUTs are cheap but concurrent
+  # runs against the same set would race on the swap.
+  group: refresh-jp-official-images
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: backend
+    strategy:
+      # Sets currently in the "pre-release / partial-official" window.
+      # Trim aggressively — a set that's fully mirrored just wastes
+      # workflow minutes.
+      matrix:
+        set_id:
+          - m6      # Storm Emeralda — released 2026-07-31
+          - m6a     # MEGA Expansion 30th Celebration — 2026-09-16
+          - m7      # Aura Seeker — 2026-11-27
+      fail-fast: false
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Private app repo checked out via a read-only deploy key —
+          # this public repo carries only the workflow files.
+          repository: pulllistapp-stack/pulllist
+          ssh-key: ${{ secrets.PULLLIST_DEPLOY_KEY }}
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Resolve set id
+        id: setid
+        run: |
+          override='${{ github.event.inputs.set_id }}'
+          if [ -n "$override" ] && [ "$override" != '${{ matrix.set_id }}' ]; then
+            echo "skip=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=0" >> "$GITHUB_OUTPUT"
+            echo "set=${{ matrix.set_id }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Refresh official images
+        if: steps.setid.outputs.skip == '0'
+        env:
+          DATABASE_URL:          ${{ secrets.DATABASE_URL }}
+          R2_ACCESS_KEY_ID:      ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY:  ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          # R2_ENDPOINT / _BUCKET / _PUBLIC_URL are non-sensitive
+          # infra config (bucket name is public, endpoint is the
+          # standard Cloudflare template, pub URL is a publicly
+          # accessible R2 domain), so they live inline here rather
+          # than in the secrets pool. Kept in sync with backend/.env
+          # by anyone rotating the bucket.
+          R2_ENDPOINT:           https://ee13d55a8c51339e074dcac7af9c9b48.r2.cloudflarestorage.com
+          R2_BUCKET:             pulllist-setslogosbackup
+          R2_PUBLIC_URL:         https://pub-41c2ef36112f48f3bba1ce11a627209d.r2.dev
+          LOG_LEVEL: INFO
+        run: |
+          python -m scripts.refresh_official_jp_images \
+            --set "${{ steps.setid.outputs.set }}" \
+            --apply

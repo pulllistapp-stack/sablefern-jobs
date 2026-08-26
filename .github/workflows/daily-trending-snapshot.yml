@@ -1,0 +1,59 @@
+name: Daily trending snapshot
+
+# Freezes the day's trending lists (7/30/90-day windows × gainers and
+# losers, top 20 each) into trending_snapshots.
+#
+# The trending page recomputes from card_price_snapshots on every
+# request, so a past day's ranking survives only as long as the prices
+# behind it — and only at the density they were collected. This keeps
+# the answer.
+#
+# Runs at 10:00 UTC, an hour after the portfolio snapshot and two
+# after the price sync, so the lists reflect the day's fresh numbers
+# rather than yesterday's.
+
+on:
+  schedule:
+    - cron: "0 10 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Report only, no writes"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Private app repo checked out via a read-only deploy key —
+          # this public repo carries only the workflow files.
+          repository: pulllistapp-stack/pulllist
+          ssh-key: ${{ secrets.PULLLIST_DEPLOY_KEY }}
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - run: pip install -r requirements.txt
+      - env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          # Defaults to production inside the script; overridable for
+          # pointing a run at a different deployment.
+          PULLLIST_API_BASE: ${{ secrets.PULLLIST_API_BASE || 'https://api.pulllist.org/api/v1' }}
+        run: |
+          args=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            args="--dry-run"
+          fi
+          python -m scripts.snapshot_trending $args
