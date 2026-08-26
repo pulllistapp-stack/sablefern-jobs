@@ -2,16 +2,18 @@
 
 Scheduled database jobs for a Pokémon TCG collection tracker.
 
-Three cron workflows, nothing else:
+Cron workflows only, in two flavors:
 
-| Job | Schedule (UTC) | What it does |
-|---|---|---|
-| `daily-tcgplayer-sync` | 08:00 | Pulls the day's [TCGCSV](https://tcgcsv.com) archive, refreshes card market prices, tops up Cardmarket figures |
-| `daily-products-sync` | 08:15 | Snapshots sealed-product prices from the same archive |
-| `daily-portfolio-snapshot` | 09:00 | Rolls up each user's collection value for the growth charts |
+* **Mirror jobs** (`daily-tcgplayer-sync`, `daily-products-sync`,
+  `daily-portfolio-snapshot`) run against the script copies under
+  `app/` + `scripts/` in this repository.
+* **Checkout jobs** (the rest) check out the private application
+  repository through a read-only deploy key and run its scripts
+  directly — this repository carries only their workflow files.
 
-Order matters: card prices land first, then sealed prices, then
-valuations computed against the day's fresh numbers.
+Order matters for the morning chain: card prices land first, then
+sealed prices, then valuations computed against the day's fresh
+numbers.
 
 The application these serve — API, web frontend, image pipeline,
 everything user-facing — lives elsewhere and is not part of this
@@ -34,9 +36,10 @@ When a column is added upstream, mirror it here too.
 
 ## Configuration
 
-One secret, `DATABASE_URL`, set at the repository level. Every workflow
-runs on `schedule` and `workflow_dispatch` only — never
-`pull_request_target` — so a fork cannot reach it.
+Secrets (database URL, storage and marketplace API credentials, and
+the read-only deploy key) are set at the repository level. Every
+workflow runs on `schedule` and `workflow_dispatch` only — never
+`pull_request_target` — so a fork cannot reach them.
 
 `POKEMONTCG_API_KEY` is optional; it raises the rate limit on the
 Cardmarket top-up.
