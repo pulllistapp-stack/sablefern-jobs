@@ -1,0 +1,47 @@
+name: Monthly TCGplayer bulk sync (sub-$1 long-tail)
+
+# Refreshes the bulk-card long tail (<$1 AND set released >30 days ago)
+# that the daily workflow intentionally skips to save Neon egress.
+# Daily covers the cards collectors actually act on; this monthly run
+# catches the slow drift on commons / older bulk so they don't decay
+# indefinitely.
+#
+# Tier filter logic lives in scripts/sync_tcgcsv_daily.py — this
+# workflow just sets --tier monthly.
+
+on:
+  schedule:
+    # 03:00 UTC on the 1st of every month = 22:00 ET (previous night).
+    # Late enough that any prior cron has settled, early enough that a
+    # 60-90 minute run finishes before North America wakes.
+    - cron: "0 3 1 * *"
+  workflow_dispatch:
+
+jobs:
+  bulk-sync:
+    runs-on: ubuntu-latest
+    # Larger window than the daily — we're walking ~10k extra cards.
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: pulllistapp-stack/pulllist
+          ssh-key: ${{ secrets.PULLLIST_DEPLOY_KEY }}
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: TCGplayer sync (TCGCSV) — monthly bulk tier
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          LOG_LEVEL: INFO
+        run: python -m scripts.sync_tcgcsv_daily --tier monthly
