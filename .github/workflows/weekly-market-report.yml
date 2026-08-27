@@ -1,0 +1,72 @@
+name: Weekly market report
+
+# Data-driven Phase B Sprint 1 source â€” pulls this week's top movers
+# from /cards/trending and publishes one Collectory-style weekly
+# digest post. Separate workflow from the daily news bot so its
+# schedule + configuration stays clean.
+
+on:
+  schedule:
+    # Monday 15:59 UTC. Timed for a late-morning US-East publish;
+    # which is UTC-4 â†’ 15:59 UTC. GitHub schedule fires can lag up to
+    # a couple hours during high-traffic windows so the actual post can
+    # land anywhere in the Monday morning ET window.
+    - cron: "59 15 * * 1"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (1 = generate + log only; 0 = publish draft)'
+        required: false
+        default: '1'
+        type: choice
+        options:
+          - '1'
+          - '0'
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: pulllistapp-stack/pulllist
+          ssh-key: ${{ secrets.PULLLIST_DEPLOY_KEY }}
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/newsbot/requirements.txt
+
+      - name: Install newsbot deps
+        run: pip install -r newsbot/requirements.txt
+
+      - name: Run newsbot (market_report only)
+        env:
+          PULLLIST_API_BASE: ${{ secrets.PULLLIST_API_BASE || 'https://api.pulllist.org/api/v1' }}
+          NEWSBOT_ADMIN_EMAIL: ${{ secrets.NEWSBOT_ADMIN_EMAIL }}
+          NEWSBOT_ADMIN_PASSWORD: ${{ secrets.NEWSBOT_ADMIN_PASSWORD }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # R2 — newsbot.mirror uploads hero + inline images to our
+          # bucket so origin CDNs rotating URLs can't break published tiles.
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          # Only the market_report source runs this cron â€” turn every
+          # other crawl off to keep the weekly digest workflow single-
+          # purpose. web_search skips itself when SERPER_API_KEY is
+          # blank, pokebeach + pokemoncenter only enrich when their
+          # own URLs come through the crawl.
+          MARKET_REPORT_ENABLED: "1"
+          WEB_SEARCH_ENABLED: "0"
+          # Weekly reports are 1 per fire â€” no per-day cap needed, but
+          # we set it defensively so a bug that generated 5 dupe reports
+          # can't drain Claude budget.
+          DAILY_POST_LIMIT: "1"
+          DRY_RUN: ${{ inputs.dry_run || '0' }}
+          LOG_LEVEL: INFO
+        run: python -m newsbot.main

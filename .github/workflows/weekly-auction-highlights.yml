@@ -1,0 +1,66 @@
+name: Weekly auction highlights
+
+# Phase B Sprint 5 â€” publishes the weekly eBay auction-highlights
+# ranking on Thursday. Complements the Monday market-movers post:
+# Monday is 'what moved', Thursday is 'what actually traded'.
+
+on:
+  schedule:
+    # Thursday 14:00 UTC = EDT 10:00 AM. Between the daily news bot
+    # (12:00) and set overview (13:00) â€” but Thursday, not overlapping
+    # with any other weekly / monthly cron.
+    - cron: "0 14 * * 4"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (1 = generate + log only; 0 = publish draft)'
+        required: false
+        default: '1'
+        type: choice
+        options:
+          - '1'
+          - '0'
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: pulllistapp-stack/pulllist
+          ssh-key: ${{ secrets.PULLLIST_DEPLOY_KEY }}
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/newsbot/requirements.txt
+
+      - name: Install newsbot deps
+        run: pip install -r newsbot/requirements.txt
+
+      - name: Run newsbot (auction_highlights only)
+        env:
+          PULLLIST_API_BASE: ${{ secrets.PULLLIST_API_BASE || 'https://api.pulllist.org/api/v1' }}
+          NEWSBOT_ADMIN_EMAIL: ${{ secrets.NEWSBOT_ADMIN_EMAIL }}
+          NEWSBOT_ADMIN_PASSWORD: ${{ secrets.NEWSBOT_ADMIN_PASSWORD }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # R2 — newsbot.mirror uploads hero + inline images to our
+          # bucket so origin CDNs rotating URLs can't break published tiles.
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AUCTION_HIGHLIGHTS_ENABLED: "1"
+          ILLUSTRATOR_FEATURE_ENABLED: "0"
+          PRICE_CLUB_ENABLED: "0"
+          SET_OVERVIEW_ENABLED: "0"
+          MARKET_REPORT_ENABLED: "0"
+          WEB_SEARCH_ENABLED: "0"
+          DAILY_POST_LIMIT: "1"
+          DRY_RUN: ${{ inputs.dry_run || '0' }}
+          LOG_LEVEL: INFO
+        run: python -m newsbot.main

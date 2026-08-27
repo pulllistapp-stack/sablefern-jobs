@@ -1,0 +1,128 @@
+name: Daily news bot
+
+# Cron enabled after Phase 1 lived through 3+ clean dry-runs and
+# multiple successful live runs. Manual trigger still available for
+# backfilling / off-cycle posts.
+
+on:
+  schedule:
+    # 12:00 UTC = 21:00 KST = 8am ET. After the eBay (07:00 UTC) +
+    # TCGplayer (08:00 UTC) snapshots so all three workflows don't
+    # contend on the Render free tier at the same time.
+    - cron: "0 12 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (1 = crawl + generate + log only; 0 = publish drafts)'
+        required: false
+        default: '1'
+        type: choice
+        options:
+          - '1'
+          - '0'
+      post_limit:
+        description: 'Override daily_post_limit for this run (blank = default 2). Use for backfills.'
+        required: false
+        default: ''
+        type: string
+      enable_web_search:
+        description: 'Phase 2 web_search source. Blank = cron default (on). Set 0 to disable for this run.'
+        required: false
+        default: ''
+        type: choice
+        options:
+          - ''
+          - '1'
+          - '0'
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    # Generation per item is ~30-60s of Claude latency plus crawl +
+    # fact-check. 30m is plenty even with the daily_post_limit ceiling.
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: pulllistapp-stack/pulllist
+          ssh-key: ${{ secrets.PULLLIST_DEPLOY_KEY }}
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/newsbot/requirements.txt
+
+      - name: Install newsbot deps
+        run: pip install -r newsbot/requirements.txt
+
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          # `v4` key bump: 2026-08-15 diagnosed pokebeach 0-items as
+          # patchright expecting chromium-1228 while `scrapling
+          # install` populated a different revision path. See
+          # docs/investigations/pokebeach-0items-2026-08.md. Invalidate
+          # the cache once and let both installers write into a fresh
+          # dir. Requirements changes still invalidate via hashFiles.
+          key: ${{ runner.os }}-playwright-v4-${{ hashFiles('backend/newsbot/requirements.txt') }}
+
+      - name: Install Scrapling browser binaries
+        # Belt-and-suspenders: install even on cache hit. The install
+        # is a no-op when the binaries are already there and only
+        # ~10s when they aren't, so the cost is negligible next to
+        # a whole silent skipped-PokeBeach day.
+        #
+        # `patchright install chromium` is required in addition to
+        # `scrapling install`: scrapling delegates to playwright's
+        # binary manager (revision A), but AsyncStealthySession
+        # actually launches via patchright which pins revision B
+        # (chromium-1228). Without this line pokebeach errors with
+        # "Executable doesn't exist at chromium-1228/...". See
+        # docs/investigations/pokebeach-0items-2026-08.md.
+        run: |
+          scrapling install
+          patchright install chromium
+
+      - name: Run newsbot
+        env:
+          # API target — override via the optional repo secret to point at staging.
+          PULLLIST_API_BASE: ${{ secrets.PULLLIST_API_BASE || 'https://api.pulllist.org/api/v1' }}
+          NEWSBOT_ADMIN_EMAIL: ${{ secrets.NEWSBOT_ADMIN_EMAIL }}
+          NEWSBOT_ADMIN_PASSWORD: ${{ secrets.NEWSBOT_ADMIN_PASSWORD }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+          SERPER_API_KEY: ${{ secrets.SERPER_API_KEY }}
+          # R2 — needed by newsbot.mirror to upload hero + inline
+          # images to our own bucket at publish time so origin CDNs
+          # rotating URLs can't break already-published tiles.
+          # Absent → mirror no-ops and images fall back to weserv
+          # wrap (previous behaviour).
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          # Per-run override > org secret > built-in default. Fallback
+          # bumped to 5 (was 2) to match the config.py default after
+          # widened to a fuller daily slate — the yaml fallback was
+          # silently overriding the settings value on every schedule
+          # run. Manual backfill runs can still push past this via
+          # the post_limit input.
+          DAILY_POST_LIMIT: ${{ inputs.post_limit || secrets.DAILY_POST_LIMIT || '8' }}
+          # Schedule fires don't carry inputs — fall back to '0' (live)
+          # so the daily cron posts drafts. Manual UI triggers keep
+          # their explicit '1' / '0' choice; the input default is '1'
+          # so a fat-fingered manual run can't accidentally publish.
+          DRY_RUN: ${{ inputs.dry_run || '0' }}
+          # Phase 2: web_search is ON by default for cron runs (Serper
+          # validated end-to-end 2026-06-27). Manual UI triggers still
+          # default to the input's '0' so a fat-finger test trigger
+          # doesn't accidentally spend Serper credits + Claude tokens.
+          # Schedule fires don't carry inputs → fall back to '1' below.
+          WEB_SEARCH_ENABLED: ${{ inputs.enable_web_search || '1' }}
+          LOG_LEVEL: INFO
+        run: python -m newsbot.main

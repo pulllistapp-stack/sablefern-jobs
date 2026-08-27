@@ -1,0 +1,114 @@
+name: eBay raw-sold (daily rotation)
+
+# Phase B Part 3. Daily raw-sold scrape via Playwright + an authenticated session
+# cookies (EBAY_SESSION_B64). Complements the weekly graded rotation
+# (ebay-sold-scrape.yml, Sun/Tue/Wed/Sat) — this one runs every day
+# and covers RAW singles, which the graded pipeline ignores.
+#
+# Card selection: EN cards priced above --min-price, ranked by market
+# DESC, skip anything with a sold snapshot in the last N days. That
+# gives us a rolling coverage where fresh-release + high-value cards
+# get sampled first, and week-over-week we drill deeper into the
+# catalog instead of re-scraping the same top-200.
+#
+# After the scrape lands new snapshots, backfill_consensus_market_price
+# re-blends Card.market_price_usd for every card whose signal moved.
+# Together with the nightly sync_tcgcsv_daily (which uses the same
+# consensus helper), this keeps the catalog headline within striking
+# distance of real market on both fresh releases and vintage chase.
+
+on:
+  schedule:
+    # 12:00 UTC = 08:00 ET = 21:00 KST. Offset 3h from the graded
+    # rotation (09:00 UTC) so xvfb + Chromium don't compete for the
+    # runner's resources when both fire the same day.
+    - cron: "0 12 * * *"
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Max cards to scrape (default 200 ≈ 100 min at 30s/card)"
+        required: false
+        default: "200"
+      min_price:
+        description: "Skip cards below this market_price_usd"
+        required: false
+        default: "5"
+      skip_recent_days:
+        description: "Skip cards with a raw sold snapshot in last N days"
+        required: false
+        default: "7"
+      run_backfill:
+        description: "Re-blend consensus after scrape completes"
+        required: false
+        default: "true"
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: pulllistapp-stack/pulllist
+          ssh-key: ${{ secrets.PULLLIST_DEPLOY_KEY }}
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install Python deps
+        run: pip install -r requirements.txt
+
+      - name: Install Playwright + Chromium
+        run: |
+          pip install playwright playwright-stealth
+          python -m playwright install --with-deps chromium
+
+      - name: Install Xvfb (virtual X server for visible-mode Chromium)
+        run: sudo apt-get install -y xvfb
+
+      - name: Scrape raw sold listings
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          EBAY_SESSION_B64: ${{ secrets.EBAY_SESSION_B64 }}
+        run: |
+          xvfb-run --auto-servernum \
+            python -m scripts.scrape_ebay_sold \
+              --raw \
+              --limit "${{ github.event.inputs.limit || '200' }}" \
+              --min-price "${{ github.event.inputs.min_price || '5' }}" \
+              --skip-if-recent-days "${{ github.event.inputs.skip_recent_days || '7' }}" \
+              --ipg 120 \
+              --max-attempts 3 \
+              --throttle-ms 1500
+
+      - name: Re-blend market_price_usd via consensus helper
+        if: github.event.inputs.run_backfill != 'false'
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        # Full-catalog scope — backfill helper skips rows whose
+        # blend result is unchanged (<1 cent diff), so this is cheap
+        # even when the scrape only moved a handful of cards.
+        run: |
+          python -m scripts.backfill_consensus_market_price
+
+      - name: Generate AI insights for 7d trending cards
+        # Feeds the homepage 90-day outlook strip via
+        # /api/v1/insights/latest. Reads trending_snapshots (frozen
+        # 10:00 UTC by the trending snapshot job), not this job's
+        # scrape output — so it still runs when the scrape flakes on
+        # an eBay bot check. Two of the ten slots come from the losers
+        # list so the strip shows directional contrast. Cards with a
+        # <24h insight are skipped; standard mode is Haiku, so a full
+        # 10-card day costs cents.
+        if: ${{ !cancelled() }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          python -m scripts.generate_trending_insights --limit 10 --losers 2

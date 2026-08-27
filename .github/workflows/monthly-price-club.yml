@@ -1,0 +1,63 @@
+name: Monthly price club
+
+# Phase B Sprint 3 â€” publishes the '$1000+ club' ranking on the 1st
+# of every month. Single post per fire, single source enabled.
+
+on:
+  schedule:
+    # 1st of the month at 14:00 UTC = EDT 10:00 AM. Between the daily
+    # news bot (12:00) and daily set overview (13:00) so all three
+    # Anthropic hits stagger during peak US morning.
+    - cron: "0 14 1 * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (1 = generate + log only; 0 = publish draft)'
+        required: false
+        default: '1'
+        type: choice
+        options:
+          - '1'
+          - '0'
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: pulllistapp-stack/pulllist
+          ssh-key: ${{ secrets.PULLLIST_DEPLOY_KEY }}
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/newsbot/requirements.txt
+
+      - name: Install newsbot deps
+        run: pip install -r newsbot/requirements.txt
+
+      - name: Run newsbot (price_club only)
+        env:
+          PULLLIST_API_BASE: ${{ secrets.PULLLIST_API_BASE || 'https://api.pulllist.org/api/v1' }}
+          NEWSBOT_ADMIN_EMAIL: ${{ secrets.NEWSBOT_ADMIN_EMAIL }}
+          NEWSBOT_ADMIN_PASSWORD: ${{ secrets.NEWSBOT_ADMIN_PASSWORD }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # R2 — newsbot.mirror uploads hero + inline images to our
+          # bucket so origin CDNs rotating URLs can't break published tiles.
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          PRICE_CLUB_ENABLED: "1"
+          SET_OVERVIEW_ENABLED: "0"
+          MARKET_REPORT_ENABLED: "0"
+          WEB_SEARCH_ENABLED: "0"
+          DAILY_POST_LIMIT: "1"
+          DRY_RUN: ${{ inputs.dry_run || '0' }}
+          LOG_LEVEL: INFO
+        run: python -m newsbot.main
