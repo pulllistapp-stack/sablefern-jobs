@@ -1,0 +1,72 @@
+name: eBay sold — refresh one card (user-triggered)
+
+# Fires from the card detail page's Refresh button, routed
+# through the backend's POST /cards/{id}/refresh-graded-prices
+# endpoint (which uses a GitHub PAT to workflow_dispatch this
+# workflow with card_id + tier inputs).
+#
+# One workflow run = one card × all 4 tiers × ~25s each ≈ 2-3 min.
+# The user sees "Processing…" on the card page and can reload
+# after a couple of minutes to see the fresh medians.
+#
+# All 4 tiers hit sequentially (not matrix) so a single click
+# uses one runner ~= 15 GH Actions minutes. If per-user rate
+# limiting keeps this at <100 refreshes/mo, cost is <1,500 min
+# on top of the weekly sweep.
+
+on:
+  workflow_dispatch:
+    inputs:
+      card_id:
+        description: "Card id (e.g. neo4-107, sv8pt5-161)"
+        required: true
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: pulllistapp-stack/pulllist
+          ssh-key: ${{ secrets.PULLLIST_DEPLOY_KEY }}
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - run: pip install -r requirements.txt
+
+      - run: |
+          pip install playwright playwright-stealth
+          python -m playwright install --with-deps chromium
+
+      - run: sudo apt-get install -y xvfb
+
+      - name: Refresh all 4 tiers for card
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          EBAY_SESSION_B64: ${{ secrets.EBAY_SESSION_B64 }}
+          CARD_ID: ${{ github.event.inputs.card_id }}
+        # Sequential 4-tier for a single card. Passing --card-id
+        # handles the market/min-price filter so anything is
+        # eligible — the user asked for it explicitly. `if: always`
+        # between steps means one throttled tier doesn't rob
+        # the others.
+        run: |
+          for tier in "PSA 10" "PSA 9" "CGC 10" "CGC 9" "BGS 10" "BGS 10 Black Label" "BGS 9.5" "BGS 9" "TAG 10" "TAG 9.5" "TAG 9"; do
+            echo "=== $tier ==="
+            xvfb-run --auto-servernum \
+              python -m scripts.scrape_ebay_sold \
+                --graded-tier "$tier" \
+                --card-id "$CARD_ID" \
+                --ipg 120 \
+                --max-attempts 3 \
+                --throttle-ms 1500 \
+                --include-asking-fallback || echo "tier $tier failed, continuing"
+          done
