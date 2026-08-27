@@ -9,10 +9,18 @@ name: Daily Snkrdunk JP price sync
 # card names are Japanese and eBay Browse is keyword-driven. Snkrdunk
 # is the JP-domestic market and prices those cards.
 #
+# Two passes per run (see scripts/sync_snkrdunk_jp.py):
+#   set pass   keyword = set code. Cheap, surfaces a set's chase cards.
+#   name pass  keyword = card name. Necessary because the set pass
+#              plateaus - "M6" returns the same 12 cards however deep
+#              you paginate, while a name search reaches cards it never
+#              returns, across every set at once.
+#
 # Rotation: a full sweep is thousands of API calls against someone
-# else's public API, so JP sets are split into 7 deterministic shards
-# and one runs per day. Every set is refreshed weekly; no single day
-# hammers the endpoint. The client also rate-limits internally.
+# else's public API, so both set ids and card names are split into 7
+# deterministic shards and one runs per day. Everything refreshes
+# weekly; no single day hammers the endpoint. The client also
+# rate-limits internally. A shard is roughly 13 minutes.
 #
 # Scheduled at 10:30 UTC — after the nightly TCGCSV sync (08:00) and
 # the price integrity audit (09:30), so this never overlaps a bulk
@@ -57,7 +65,7 @@ concurrency:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     defaults:
       run:
         working-directory: backend
