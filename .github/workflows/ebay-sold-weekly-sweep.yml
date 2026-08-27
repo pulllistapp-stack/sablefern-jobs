@@ -1,0 +1,109 @@
+name: eBay sold-listing scrape — weekly gap-fill sweep
+
+# The "set and forget" companion to the on-demand full-rotation.
+# Every Sunday 08:00 UTC (03:00 ET, eBay off-peak) each grade
+# tier grabs the next 400 uncovered cards on its own runner in
+# matrix parallel. `skip-if-recent-days=14` means the sweep never
+# revisits a card scraped in the last two weeks, so the candidate
+# pool shrinks week-over-week — coverage drills deeper into the
+# $35+ tier instead of re-scraping the same top chase.
+#
+# Saturation math ($35+ pool = ~2,200 EN cards × 4 tiers):
+#     Week 1: top 400 chase covered
+#     Week 2: next 400 (skip week 1 — still <14d old)
+#     Week 3: next 400 (skip weeks 1-2)
+#     ...
+#     Week 6: full $35+ pool covered per tier
+#     Week 7+: week 1 ages past 14 days → refreshes.
+#   Steady state: each card refreshed every ~5-6 weeks.
+#
+# Budget math (private repo, 2,000 min/mo free tier):
+#   4 runners × (400 × ~22s + 5 min setup) = 4 × ~150 min = 600 min/sweep
+#   × ~4.3 sweeps/month = ~2,580 min/mo → ~30% over budget alone.
+#   Plus the daily-tier rotation adds ~1,170 min/mo. Options:
+#     (a) Accept ~$14/mo overage.
+#     (b) Make the repo public → unlimited free minutes.
+#     (c) Disable daily rotation (keep sweep only).
+#     (d) Shrink limit to 250 → ~1,720 min/mo alone.
+# Per-card manual "Refresh" from the frontend uses a separate
+# workflow (ebay-sold-refresh-one-card.yml) that fires exactly one
+# scrape per click, so users can top up specific listings on
+# demand without waiting for the Sunday cadence.
+
+on:
+  schedule:
+    # Sunday 08:00 UTC (03:00 ET), eBay off-peak.
+    - cron: "0 8 * * 0"
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Cards PER TIER this sweep"
+        required: false
+        default: "250"
+      min_price:
+        description: "Skip cards below this market_price_usd (users self-serve the rest via Refresh)"
+        required: false
+        default: "200"
+      skip_if_recent_days:
+        description: "Skip cards refreshed in last N days (14 default = rolling coverage)"
+        required: false
+        default: "14"
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      # Never cancel siblings — one tier tripping should not
+      # rob the other three of their sweep.
+      fail-fast: false
+      matrix:
+        # Grade 10 tiers + BGS Black Label. See ebay-sold-full-
+        # rotation.yml for the rationale — Black Label is a distinct
+        # market that gets its own query so a mixed "BGS 10" query
+        # doesn't blend Black Label premiums into the regular median.
+        tier:
+          - { label: "PSA 10", slug: "psa10" }
+          - { label: "CGC 10", slug: "cgc10" }
+          - { label: "BGS 10", slug: "bgs10" }
+          - { label: "BGS 10 Black Label", slug: "bgs10bl" }
+          - { label: "TAG 10", slug: "tag10" }
+    name: Sweep ${{ matrix.tier.label }}
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: pulllistapp-stack/pulllist
+          ssh-key: ${{ secrets.PULLLIST_DEPLOY_KEY }}
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - run: pip install -r requirements.txt
+
+      - run: |
+          pip install playwright playwright-stealth
+          python -m playwright install --with-deps chromium
+
+      - run: sudo apt-get install -y xvfb
+
+      - name: Weekly gap-fill ${{ matrix.tier.label }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          EBAY_SESSION_B64: ${{ secrets.EBAY_SESSION_B64 }}
+        run: |
+          xvfb-run --auto-servernum \
+            python -m scripts.scrape_ebay_sold \
+              --graded-tier "${{ matrix.tier.label }}" \
+              --limit "${{ github.event.inputs.limit || '400' }}" \
+              --min-price "${{ github.event.inputs.min_price || '35' }}" \
+              --throttle-ms 2000 \
+              --ipg 120 \
+              --max-attempts 3 \
+              --skip-if-recent-days "${{ github.event.inputs.skip_if_recent_days || '14' }}" \
+              --include-asking-fallback

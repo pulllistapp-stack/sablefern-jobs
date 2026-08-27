@@ -1,0 +1,145 @@
+name: eBay sealed-sold (daily rotation)
+
+# Sealed-product counterpart to daily-ebay-raw-sold.yml. Same
+# Playwright + an authenticated session (EBAY_SESSION_B64) pipeline, but
+# it walks `products` instead of `cards`.
+#
+# Why sealed needs its own job: our sealed prices come from TCGCSV
+# only, so any SKU that never lists on TCGplayer is invisible —
+# Pokemon Center exclusives (the 30th Celebration ETB), retailer
+# exclusives, JP imports, plus the ~500 SKUs whose TCGCSV market is
+# simply NULL. The scraper orders `tcgplayer_product_id IS NULL`
+# first, so the zero-coverage population is always served before the
+# job spends time on SKUs that already have a price.
+#
+# After the scrape lands snapshots, backfill_product_consensus_price
+# re-blends Product.market_price_usd so every existing sealed consumer
+# (browse grid, product cards, EV chip, sealed portfolio, /sets/[id])
+# picks up the coverage without special-casing eBay.
+#
+# Cadence: the sealed catalog is ~1,900 SKUs against six figures of
+# cards, so this finishes in well under an hour at the default limit.
+
+on:
+  schedule:
+    # 15:00 UTC = 11:00 ET = 00:00 KST. Deliberately clear of every
+    # other eBay/pricing job: market-analysis refresh 08:00, graded
+    # rotation 09:00, raw-sold 12:00. Nothing else competes for the
+    # runner's xvfb + Chromium at this hour.
+    - cron: "0 15 * * *"
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Max products to scrape (default 60 ≈ 30 min at 30s/product)"
+        required: false
+        default: "60"
+      set_ids:
+        description: "Comma-separated set ids to scope the sweep (blank = whole catalog)"
+        required: false
+        default: ""
+      product_id:
+        description: "Single product id — overrides limit / min_price / skip_recent"
+        required: false
+        default: ""
+      min_price:
+        description: "Skip products below this market price (no-TCGplayer-id SKUs are never skipped)"
+        required: false
+        default: "20"
+      skip_recent_days:
+        description: "Skip products with an ebay_sold snapshot in last N days"
+        required: false
+        default: "7"
+      min_listings:
+        description: "Write no snapshot below this many passing sales"
+        required: false
+        default: "3"
+      dry_run:
+        description: "Parse and log but write nothing"
+        required: false
+        default: "false"
+      run_backfill:
+        description: "Re-blend Product.market_price_usd after the scrape"
+        required: false
+        default: "true"
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: pulllistapp-stack/pulllist
+          ssh-key: ${{ secrets.PULLLIST_DEPLOY_KEY }}
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install Python deps
+        run: pip install -r requirements.txt
+
+      - name: Install Playwright + Chromium
+        run: |
+          pip install playwright playwright-stealth
+          python -m playwright install --with-deps chromium
+
+      - name: Install Xvfb (virtual X server for visible-mode Chromium)
+        run: sudo apt-get install -y xvfb
+
+      - name: Scrape sealed sold listings
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          EBAY_SESSION_B64: ${{ secrets.EBAY_SESSION_B64 }}
+        # The audit CSV is what makes the numbers reviewable — every
+        # parsed listing with its keep/reject verdict and reason. It's
+        # uploaded as an artifact below rather than committed.
+        run: |
+          ARGS=""
+          if [ -n "${{ github.event.inputs.product_id }}" ]; then
+            ARGS="$ARGS --product-id ${{ github.event.inputs.product_id }}"
+          else
+            ARGS="$ARGS --limit ${{ github.event.inputs.limit || '60' }}"
+            ARGS="$ARGS --min-price ${{ github.event.inputs.min_price || '20' }}"
+            ARGS="$ARGS --skip-recent-days ${{ github.event.inputs.skip_recent_days || '7' }}"
+          fi
+          if [ -n "${{ github.event.inputs.set_ids }}" ]; then
+            ARGS="$ARGS --set-ids ${{ github.event.inputs.set_ids }}"
+          fi
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          xvfb-run --auto-servernum \
+            python -m scripts.scrape_ebay_sealed_sold \
+              $ARGS \
+              --min-listings "${{ github.event.inputs.min_listings || '3' }}" \
+              --ipg 120 \
+              --max-attempts 3 \
+              --throttle-ms 1500 \
+              --audit-csv data/sealed_sold_audit.csv
+
+      - name: Upload filter audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sealed-sold-audit
+          path: backend/data/sealed_sold_audit.csv
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Re-blend Product.market_price_usd via consensus helper
+        if: >-
+          github.event.inputs.run_backfill != 'false' &&
+          github.event.inputs.dry_run != 'true'
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        # Full-catalog scope — the helper skips rows whose blend result
+        # is unchanged (<1 cent), so this is cheap even when the scrape
+        # only moved a handful of products.
+        run: |
+          python -m scripts.backfill_product_consensus_price

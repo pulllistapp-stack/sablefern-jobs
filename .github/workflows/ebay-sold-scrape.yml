@@ -1,0 +1,92 @@
+name: eBay sold-listing scrape (rotation)
+
+on:
+  schedule:
+    # Weekly, one grade tier per day like the Browse API rotation but
+    # a day offset so we don't hammer eBay + Playwright simultaneously.
+    # Sun PSA 10, Tue CGC 10, Wed PSA 9, Sat CGC 9.
+    # 09:00 UTC = 04:00 EST — off-peak on eBay, unlikely to compete
+    # with the daily 08:00 UTC / 07:00 UTC snapshot jobs.
+    - cron: "0 9 * * 0"   # Sun — PSA 10
+    - cron: "0 9 * * 2"   # Tue — CGC 10
+    - cron: "0 9 * * 3"   # Wed — PSA 9
+    - cron: "0 9 * * 6"   # Sat — CGC 9
+  workflow_dispatch:
+    inputs:
+      graded_tier:
+        description: 'Grade tier ("PSA 10" / "CGC 10" / "PSA 9" / "CGC 9")'
+        required: false
+        default: "PSA 10"
+      limit:
+        description: "Max chase cards this run (blank = all above --min-price)"
+        required: false
+        default: "150"
+      min_price:
+        description: "Skip cards below this market_price_usd"
+        required: false
+        default: "40"
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: pulllistapp-stack/pulllist
+          ssh-key: ${{ secrets.PULLLIST_DEPLOY_KEY }}
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install Python deps
+        run: pip install -r requirements.txt
+
+      - name: Install Playwright + Chromium
+        run: |
+          pip install playwright playwright-stealth
+          # --with-deps installs the system libs Chromium needs on Ubuntu
+          python -m playwright install --with-deps chromium
+
+      - name: Install Xvfb (virtual X server)
+        # the site's automated-request protection fingerprints pure headless Chromium and throttle responses
+        # it. Running Chromium visible under a virtual display defeats
+        # the detection check without needing a real desktop.
+        run: sudo apt-get install -y xvfb
+
+      - name: Compute today's graded tier
+        id: tier
+        run: |
+          override='${{ github.event.inputs.graded_tier }}'
+          if [ -n "$override" ]; then
+            echo "suffix=$override" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          case "$(date -u +%u)" in
+            0) suffix='PSA 10' ;;   # Sun (note: date +%u treats Sun as 7 in some locales;
+            7) suffix='PSA 10' ;;   #      handle both.)
+            2) suffix='CGC 10' ;;
+            3) suffix='PSA 9' ;;
+            6) suffix='CGC 9' ;;
+            *) suffix='PSA 10' ;;
+          esac
+          echo "suffix=$suffix" >> "$GITHUB_OUTPUT"
+
+      - name: Scrape sold listings
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          EBAY_SESSION_B64: ${{ secrets.EBAY_SESSION_B64 }}
+          LOG_LEVEL: INFO
+        run: |
+          xvfb-run --auto-servernum \
+            python -m scripts.scrape_ebay_sold \
+              --graded-tier "${{ steps.tier.outputs.suffix }}" \
+              --limit "${{ github.event.inputs.limit || '150' }}" \
+              --min-price "${{ github.event.inputs.min_price || '40' }}" \
+              --throttle-ms 2000
