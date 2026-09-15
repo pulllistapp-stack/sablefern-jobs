@@ -78,6 +78,21 @@ jobs:
           echo "suffix=$suffix" >> "$GITHUB_OUTPUT"
           echo "source=rotation-dow$dow" >> "$GITHUB_OUTPUT"
 
+      - name: Fresh-release lane gate
+        # Listing + sold lanes for a just-released set switch on together
+        # on this date (30th Celebration release week). Before it, the
+        # set's price history is seeded by hand; after it, the lanes below
+        # and in daily-ebay-raw-sold.yml keep it current on their own.
+        id: fresh
+        env:
+          FRESH_LANE_FROM: "2026-09-24"
+        run: |
+          if [[ "$(date -u +%F)" < "$FRESH_LANE_FROM" ]]; then
+            echo "on=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "on=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Run eBay snapshot
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -110,3 +125,25 @@ jobs:
             --min-price 10 \
             --throttle-ms 150 \
             --graded-tiers "${{ steps.tier.outputs.suffix }}"
+
+      - name: Fresh-release lane (listing prices)
+        # The main pass only sees cards TCGCSV has already priced at $10+,
+        # which a new set takes a week or two to earn. This lane takes every
+        # card in any set released in the last 45 days (NULL prices
+        # included), raw query only — slabs of a fresh set don't exist yet.
+        # Cards the main pass already wrote today are skipped by the
+        # script, so the two never double-spend. Budget: ~600 calls on top
+        # of the 3,500 above keeps the day under the 5,000 ceiling.
+        if: steps.fresh.outputs.on == 'true'
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          EBAY_ENV: production
+          EBAY_APP_ID: ${{ secrets.EBAY_APP_ID }}
+          EBAY_CERT_ID: ${{ secrets.EBAY_CERT_ID }}
+          LOG_LEVEL: INFO
+        run: |
+          python -m scripts.snapshot_ebay \
+            --fresh-days 45 \
+            --max-calls 600 \
+            --throttle-ms 150 \
+            --graded-tiers none

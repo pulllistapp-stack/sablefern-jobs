@@ -72,6 +72,21 @@ jobs:
       - name: Install Xvfb (virtual X server for visible-mode Chromium)
         run: sudo apt-get install -y xvfb
 
+      - name: Fresh-release lane gate
+        # Same switch as daily-ebay-snapshot.yml: from this date a
+        # just-released set gets its own sold pass every day, on top of
+        # the market-ranked sweep below (which a new set's $5-30 cards
+        # would otherwise never reach inside the 200-card limit).
+        id: fresh
+        env:
+          FRESH_LANE_FROM: "2026-09-24"
+        run: |
+          if [[ "$(date -u +%F)" < "$FRESH_LANE_FROM" ]]; then
+            echo "on=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "on=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Scrape raw sold listings
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -83,6 +98,25 @@ jobs:
               --limit "${{ github.event.inputs.limit || '200' }}" \
               --min-price "${{ github.event.inputs.min_price || '5' }}" \
               --skip-if-recent-days "${{ github.event.inputs.skip_recent_days || '7' }}" \
+              --ipg 120 \
+              --max-attempts 3 \
+              --throttle-ms 1500
+
+      - name: Fresh-release lane (sold prices)
+        # Every card in any set released in the last 45 days, NULL prices
+        # included, revisited every 3 days. Runs before the re-blend below
+        # so fresh sold medians reach market_price_usd the same day.
+        if: steps.fresh.outputs.on == 'true'
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          EBAY_SESSION_B64: ${{ secrets.EBAY_SESSION_B64 }}
+        run: |
+          xvfb-run --auto-servernum \
+            python -m scripts.scrape_ebay_sold \
+              --raw \
+              --fresh-days 45 \
+              --limit 80 \
+              --skip-if-recent-days 3 \
               --ipg 120 \
               --max-attempts 3 \
               --throttle-ms 1500
