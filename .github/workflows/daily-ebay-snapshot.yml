@@ -134,6 +134,13 @@ jobs:
         # Cards the main pass already wrote today are skipped by the
         # script, so the two never double-spend. Budget: ~600 calls on top
         # of the 3,500 above keeps the day under the 5,000 ceiling.
+        #
+        # --require-number: a fresh set's prices are what this lane is
+        # for, and in a modern set most cards share a name with an
+        # alt-art twin worth twenty times as much. Without the filter the
+        # twin's listings set the median — 30th Celebration Lapras
+        # 017/128 came back at $29.99 against a $1.95 card because the
+        # search also returned the 131/128 Illustration Rare.
         if: steps.fresh.outputs.on == 'true'
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -146,4 +153,5 @@ jobs:
             --fresh-days 45 \
             --max-calls 600 \
             --throttle-ms 150 \
+            --require-number \
             --graded-tiers none
