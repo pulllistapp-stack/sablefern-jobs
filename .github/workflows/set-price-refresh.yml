@@ -57,6 +57,9 @@ jobs:
     steps:
       - name: Resolve sets and window
         id: plan
+        # Runs before checkout, so the job-wide `backend` working
+        # directory does not exist yet — pin this step to the workspace.
+        working-directory: ${{ github.workspace }}
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             sets='${{ github.event.inputs.set_ids }}'
