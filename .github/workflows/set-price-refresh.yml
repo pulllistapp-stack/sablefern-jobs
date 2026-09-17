@@ -1,0 +1,166 @@
+name: Set price refresh (launch window, every 12h)
+
+# Re-prices one set end to end — cards off live eBay listings, sealed
+# off TCGplayer and eBay sold — and runs twice a day while a set is in
+# its launch window. Two ways in:
+#
+#   schedule          09:00 and 21:00 UTC (5am / 5pm ET), for the sets in
+#                     LAUNCH_SETS, only until LAUNCH_WINDOW_END inclusive.
+#                     21:00 lands right after TCGCSV's 20:00 daily refresh,
+#                     so the evening pass carries the day's new catalogue
+#                     numbers as well.
+#   workflow_dispatch the owner's "refresh set prices" button on a set
+#                     page (POST /admin/sets/{id}/refresh-prices), and
+#                     the Actions tab. Manual runs ignore the window.
+#
+# Card pass: snapshot_ebay --refresh --require-number. --refresh replaces
+# the day's row instead of skipping cards already measured today (the
+# schema is one row per card per day); --require-number keeps a common
+# from being priced off its alt-art twin's listings. Then the consensus
+# backfill, which for sets in LISTING_BASIS_SET_IDS takes the eBay
+# number straight.
+#
+# Sealed pass: TCGplayer sync (whole catalogue — the script has no set
+# filter, ~5 min), then the Playwright sold scrape scoped to the set with
+# --skip-recent-days 0 so a 12h cadence actually re-measures, then the
+# product consensus re-blend.
+#
+# 30th Celebration launched 2026-09-16; the owner asked for twice-daily
+# corrections through 2026-09-24, after which the fresh-release lane in
+# daily-ebay-snapshot / daily-ebay-raw-sold takes over at once a day.
+
+on:
+  schedule:
+    - cron: "0 9,21 * * *"
+  workflow_dispatch:
+    inputs:
+      set_ids:
+        description: "Comma-separated set ids to re-price (e.g. me30)"
+        required: true
+        default: "me30"
+      include_sealed:
+        description: "Also re-price the set's sealed products (TCGplayer + eBay sold)"
+        required: false
+        default: "true"
+
+env:
+  LAUNCH_SETS: "me30"
+  LAUNCH_WINDOW_END: "2026-09-24"
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Resolve sets and window
+        id: plan
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            sets='${{ github.event.inputs.set_ids }}'
+            sealed='${{ github.event.inputs.include_sealed }}'
+          else
+            sets="$LAUNCH_SETS"
+            sealed="true"
+            if [[ "$(date -u +%F)" > "$LAUNCH_WINDOW_END" ]]; then
+              echo "launch window closed ($LAUNCH_WINDOW_END) — nothing to do"
+              echo "run=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+          echo "run=true" >> "$GITHUB_OUTPUT"
+          echo "sets=$sets" >> "$GITHUB_OUTPUT"
+          echo "sealed=$sealed" >> "$GITHUB_OUTPUT"
+          echo "re-pricing sets=$sets sealed=$sealed"
+
+      - uses: actions/checkout@v5
+        if: steps.plan.outputs.run == 'true'
+        with:
+          repository: pulllistapp-stack/pulllist
+          ssh-key: ${{ secrets.PULLLIST_DEPLOY_KEY }}
+
+      - uses: actions/setup-python@v6
+        if: steps.plan.outputs.run == 'true'
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install Python deps
+        if: steps.plan.outputs.run == 'true'
+        run: pip install -r requirements.txt
+
+      - name: Cards — live eBay listings
+        if: steps.plan.outputs.run == 'true'
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          EBAY_ENV: production
+          EBAY_APP_ID: ${{ secrets.EBAY_APP_ID }}
+          EBAY_CERT_ID: ${{ secrets.EBAY_CERT_ID }}
+          LOG_LEVEL: INFO
+        run: |
+          python -m scripts.snapshot_ebay \
+            --set-ids "${{ steps.plan.outputs.sets }}" \
+            --refresh \
+            --require-number \
+            --graded-tiers none \
+            --max-calls 900 \
+            --throttle-ms 150
+
+      - name: Cards — consensus re-blend
+        if: steps.plan.outputs.run == 'true'
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          python -m scripts.backfill_consensus_market_price \
+            --set-ids "${{ steps.plan.outputs.sets }}"
+
+      - name: Sealed — TCGplayer sync
+        if: steps.plan.outputs.run == 'true' && steps.plan.outputs.sealed == 'true'
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python -m scripts.sync_products_daily
+
+      - name: Install Playwright + Chromium
+        if: steps.plan.outputs.run == 'true' && steps.plan.outputs.sealed == 'true'
+        run: |
+          pip install playwright playwright-stealth
+          python -m playwright install --with-deps chromium
+
+      - name: Install Xvfb (virtual X server for visible-mode Chromium)
+        if: steps.plan.outputs.run == 'true' && steps.plan.outputs.sealed == 'true'
+        run: sudo apt-get install -y xvfb
+
+      - name: Sealed — eBay sold listings
+        if: steps.plan.outputs.run == 'true' && steps.plan.outputs.sealed == 'true'
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          EBAY_SESSION_B64: ${{ secrets.EBAY_SESSION_B64 }}
+        run: |
+          xvfb-run --auto-servernum \
+            python -m scripts.scrape_ebay_sealed_sold \
+              --set-ids "${{ steps.plan.outputs.sets }}" \
+              --skip-recent-days 0 \
+              --min-price 0 \
+              --min-listings 3 \
+              --ipg 120 \
+              --max-attempts 3 \
+              --throttle-ms 1500 \
+              --audit-csv data/sealed_sold_audit.csv
+
+      - name: Upload filter audit
+        if: always() && steps.plan.outputs.run == 'true' && steps.plan.outputs.sealed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sealed-sold-audit
+          path: backend/data/sealed_sold_audit.csv
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Sealed — consensus re-blend
+        if: steps.plan.outputs.run == 'true' && steps.plan.outputs.sealed == 'true'
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python -m scripts.backfill_product_consensus_price
