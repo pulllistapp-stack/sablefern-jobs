@@ -6,6 +6,7 @@ name: Daily TCGplayer / TCGCSV price sync
 # Moved here from the main repo so it runs on public-repo Actions
 # minutes. Nothing in this job touches a browser or an anti-bot
 # surface — it reads a published price archive over plain HTTP.
+# The code itself lives in the private app repo (see checkout below).
 
 on:
   schedule:
@@ -19,13 +20,24 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: backend
     steps:
       - uses: actions/checkout@v5
+        with:
+          # Private app repo checked out via a read-only deploy key —
+          # this public repo carries only the workflow files. Until
+          # 2026-09-19 this job ran a copy of the scripts kept in this
+          # repo, frozen on 2026-07-27, so every morning it rewrote
+          # prices with logic the app had long since replaced.
+          repository: pulllistapp-stack/pulllist
+          ssh-key: ${{ secrets.PULLLIST_DEPLOY_KEY }}
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: requirements.txt
+          cache-dependency-path: backend/requirements.txt
       - run: pip install -r requirements.txt
 
       - name: TCGCSV daily tier
