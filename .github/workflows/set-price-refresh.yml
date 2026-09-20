@@ -162,6 +162,24 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+      - name: Sealed — live eBay listings
+        # One Browse call per product in the launch sets; the median of
+        # what survives the granularity guards becomes the headline
+        # (label 'ask') in the re-blend below, the way the cards' does.
+        if: steps.plan.outputs.run == 'true' && steps.plan.outputs.sealed == 'true'
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          EBAY_ENV: production
+          EBAY_APP_ID: ${{ secrets.EBAY_APP_ID }}
+          EBAY_CERT_ID: ${{ secrets.EBAY_CERT_ID }}
+          LOG_LEVEL: INFO
+        run: |
+          python -m scripts.snapshot_ebay_products \
+            --set-ids "${{ steps.plan.outputs.sets }}" \
+            --refresh \
+            --max-calls 120 \
+            --throttle-ms 150
+
       - name: Sealed — consensus re-blend
         if: steps.plan.outputs.run == 'true' && steps.plan.outputs.sealed == 'true'
         env:
