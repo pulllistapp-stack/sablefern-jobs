@@ -114,14 +114,20 @@ jobs:
         #                     in TCGCSV, the next cron picks it up
         #                     automatically (market_price_usd is refreshed
         #                     daily by sync_tcgcsv_daily.py).
-        #   --max-calls 3500: leaves ~1,500 calls/day for browsing +
-        #                     wishlist alert polling (planned).
+        #   --max-calls 2000: was 3500 until 2026-09-22, which with the
+        #                     other crons left ~1,200 calls for the day
+        #                     and the live-listings panels were showing
+        #                     eBay's 429 by mid-afternoon ET. 2000 keeps
+        #                     ~2,400 for browsing (the endpoints cache
+        #                     30 min per card/product now) at the cost
+        #                     of ~1,000 chase cards/day instead of 1,750;
+        #                     the rest keep TCGCSV pricing and rotate in
+        #                     as prices move.
         #   --graded-tiers  : today's slot in the DOW rotation. Each card
-        #                     costs 2 calls (raw + this tier); with the
-        #                     3500 cap that's ~1,750 chase cards.
+        #                     costs 2 calls (raw + this tier).
         run: |
           python -m scripts.snapshot_ebay \
-            --max-calls 3500 \
+            --max-calls 2000 \
             --min-price 10 \
             --throttle-ms 150 \
             --graded-tiers "${{ steps.tier.outputs.suffix }}"
