@@ -1,0 +1,80 @@
+name: Ingest — Delta Reign reveals (Claude-verified, twice daily)
+
+# Collects Delta Reign reveal images from PokéBeach's Delta Reign
+# articles and Serebii's set page, reads each new image with Claude
+# (set code + language mark, collector number, rarity symbol, name, HP,
+# type) and adds only cards whose face says DLR EN to me6. Spanish /
+# French scans, product shots and other sets are rejected. Images are
+# mirrored to R2; existing rows are never touched.
+#
+# Every image is read once in its life (reveal_image_checks table), so
+# a pass with nothing new costs no Claude calls. The script stops by
+# itself two weeks after release (2026-11-06) — delete this file then.
+#
+# Undo: python -m scripts.auto_ingest_set_reveals --revert-since YYYY-MM-DD
+
+on:
+  schedule:
+    # 11:30 UTC = 7:30am ET (6:30am after DST ends Nov 1) — the morning pass.
+    - cron: "30 11 * * *"
+    # 23:30 UTC = 7:30pm ET — catches reveals posted during the US day.
+    - cron: "30 23 * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "apply = read + insert · read = read only (no writes) · dry = list candidates, no Claude"
+        type: choice
+        options: ["apply", "read", "dry"]
+        default: "apply"
+
+concurrency:
+  group: ingest-set-reveals
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Private app repo checked out via a read-only deploy key —
+          # this public repo carries only the workflow files.
+          repository: pulllistapp-stack/pulllist
+          ssh-key: ${{ secrets.PULLLIST_DEPLOY_KEY }}
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          # The backend pins anthropic 0.42.0, which predates structured
+          # outputs and the current models. This job alone runs a newer SDK.
+          pip install "anthropic==0.125.0"
+
+      - name: Ingest reveals
+        env:
+          DATABASE_URL:          ${{ secrets.DATABASE_URL }}
+          ANTHROPIC_API_KEY:     ${{ secrets.ANTHROPIC_API_KEY }}
+          BEACON_KEY:            ${{ secrets.BEACON_KEY }}
+          R2_ACCESS_KEY_ID:      ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY:  ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          # Non-sensitive infra config, kept inline and in sync with
+          # backend/.env — same as refresh-jp-official-images.yml.
+          R2_ENDPOINT:           https://ee13d55a8c51339e074dcac7af9c9b48.r2.cloudflarestorage.com
+          R2_BUCKET:             pulllist-setslogosbackup
+          R2_PUBLIC_URL:         https://pub-41c2ef36112f48f3bba1ce11a627209d.r2.dev
+        run: |
+          case "${{ inputs.mode || 'apply' }}" in
+            apply) flag="--apply" ;;
+            read)  flag="--read" ;;
+            *)     flag="" ;;
+          esac
+          python -m scripts.auto_ingest_set_reveals --set me6 $flag
