@@ -58,6 +58,9 @@ jobs:
           # The backend pins anthropic 0.42.0, which predates structured
           # outputs and the current models. This job alone runs a newer SDK.
           pip install "anthropic==0.125.0"
+          # PokéBeach refuses curl from runner IPs but lets a browser in.
+          pip install playwright
+          python -m playwright install --with-deps chromium
 
       - name: Ingest reveals
         env:
