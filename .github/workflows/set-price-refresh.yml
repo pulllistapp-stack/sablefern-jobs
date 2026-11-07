@@ -25,9 +25,19 @@ name: Set price refresh (launch window, every 12h)
 # --skip-recent-days 0 so a 12h cadence actually re-measures, then the
 # product consensus re-blend.
 #
-# 30th Celebration launched 2026-09-16; the owner asked for twice-daily
-# corrections through 2026-09-24, after which the fresh-release lane in
-# daily-ebay-snapshot / daily-ebay-raw-sold takes over at once a day.
+# Launch pass (scheduled runs, and sold_pass=true by hand): an eBay sold
+# scrape of the launch cards, then the TCGCSV card sync. In a launch
+# window (LAUNCH_UNTIL in app/services/consensus.py) the headline is
+# TCGplayer's market plus any sold median at most a day old, so both have
+# to run on this cadence. TCGCSV refreshes around 20:00 UTC and the daily
+# card sync runs at 08:00, so without this pass the headline trails the
+# market by half a day on the days it moves most.
+#
+# 30th Celebration launched 2026-09-16 and got twice-daily corrections
+# through 2026-09-24. Delta Reign and the November 30th wave launched
+# 2026-11-06 and get them through 2026-11-20, after which the
+# fresh-release lane in daily-ebay-snapshot / daily-ebay-raw-sold takes
+# over at once a day.
 
 on:
   schedule:
@@ -42,10 +52,14 @@ on:
         description: "Also re-price the set's sealed products (TCGplayer + eBay sold)"
         required: false
         default: "true"
+      sold_pass:
+        description: "Also run the launch-card eBay sold scrape"
+        required: false
+        default: "false"
 
 env:
-  LAUNCH_SETS: "me30"
-  LAUNCH_WINDOW_END: "2026-09-24"
+  LAUNCH_SETS: "me6,me30"
+  LAUNCH_WINDOW_END: "2026-11-20"
 
 jobs:
   refresh:
@@ -64,9 +78,11 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             sets='${{ github.event.inputs.set_ids }}'
             sealed='${{ github.event.inputs.include_sealed }}'
+            sold='${{ github.event.inputs.sold_pass }}'
           else
             sets="$LAUNCH_SETS"
             sealed="true"
+            sold="true"
             if [[ "$(date -u +%F)" > "$LAUNCH_WINDOW_END" ]]; then
               echo "launch window closed ($LAUNCH_WINDOW_END) — nothing to do"
               echo "run=false" >> "$GITHUB_OUTPUT"
@@ -76,7 +92,8 @@ jobs:
           echo "run=true" >> "$GITHUB_OUTPUT"
           echo "sets=$sets" >> "$GITHUB_OUTPUT"
           echo "sealed=$sealed" >> "$GITHUB_OUTPUT"
-          echo "re-pricing sets=$sets sealed=$sealed"
+          echo "sold=$sold" >> "$GITHUB_OUTPUT"
+          echo "re-pricing sets=$sets sealed=$sealed sold=$sold"
 
       - uses: actions/checkout@v5
         if: steps.plan.outputs.run == 'true'
@@ -95,6 +112,16 @@ jobs:
         if: steps.plan.outputs.run == 'true'
         run: pip install -r requirements.txt
 
+      - name: Install Playwright + Chromium
+        if: steps.plan.outputs.run == 'true' && (steps.plan.outputs.sealed == 'true' || steps.plan.outputs.sold == 'true')
+        run: |
+          pip install playwright playwright-stealth
+          python -m playwright install --with-deps chromium
+
+      - name: Install Xvfb (virtual X server for visible-mode Chromium)
+        if: steps.plan.outputs.run == 'true' && (steps.plan.outputs.sealed == 'true' || steps.plan.outputs.sold == 'true')
+        run: sudo apt-get install -y xvfb
+
       - name: Cards — live eBay listings
         if: steps.plan.outputs.run == 'true'
         env:
@@ -112,6 +139,43 @@ jobs:
             --max-calls 900 \
             --throttle-ms 150
 
+      - name: Cards — eBay sold (launch cards)
+        # Top of Delta Reign by price, then the November 30th promos,
+        # which live in me30 and so fall outside any set-wide limit.
+        # A sold failure (an expired session, say) must not stop the
+        # TCGplayer pass below.
+        if: steps.plan.outputs.run == 'true' && steps.plan.outputs.sold == 'true'
+        continue-on-error: true
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          EBAY_SESSION_B64: ${{ secrets.EBAY_SESSION_B64 }}
+        run: |
+          xvfb-run --auto-servernum \
+            python -m scripts.scrape_ebay_sold \
+              --raw \
+              --set-ids me6 \
+              --limit 60 \
+              --skip-if-recent-days 0 \
+              --ipg 120 \
+              --max-attempts 3 \
+              --throttle-ms 1500
+          xvfb-run --auto-servernum \
+            python -m scripts.scrape_ebay_sold \
+              --raw \
+              --card-id mep-104 --card-id mep-105 --card-id mep-106 \
+              --card-id mep-107 --card-id mep-108 --card-id mep-109 \
+              --card-id mep-110 \
+              --skip-if-recent-days 0 \
+              --ipg 120 \
+              --max-attempts 3 \
+              --throttle-ms 1500
+
+      - name: Cards — TCGplayer sync
+        if: steps.plan.outputs.run == 'true' && steps.plan.outputs.sold == 'true'
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python -m scripts.sync_tcgcsv_daily --tier daily
+
       - name: Cards — consensus re-blend
         if: steps.plan.outputs.run == 'true'
         env:
@@ -125,16 +189,6 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python -m scripts.sync_products_daily
-
-      - name: Install Playwright + Chromium
-        if: steps.plan.outputs.run == 'true' && steps.plan.outputs.sealed == 'true'
-        run: |
-          pip install playwright playwright-stealth
-          python -m playwright install --with-deps chromium
-
-      - name: Install Xvfb (virtual X server for visible-mode Chromium)
-        if: steps.plan.outputs.run == 'true' && steps.plan.outputs.sealed == 'true'
-        run: sudo apt-get install -y xvfb
 
       - name: Sealed — eBay sold listings
         if: steps.plan.outputs.run == 'true' && steps.plan.outputs.sealed == 'true'
